@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { PieChart, Pie, Cell, Tooltip } from "recharts";
 
 // ─── INJECT GLOBAL STYLES ───────────────────────────────────────────────────
@@ -603,7 +603,6 @@ export default function App() {
   const currentMins     = now.getHours() * 60 + now.getMinutes();
   const timeIndicatorTop = currentMins - GRID_START;
   const showIndicator   = timeIndicatorTop >= 0 && timeIndicatorTop <= GRID_HEIGHT;
-  const todayColIndex   = weekDates.indexOf(todayStr);
 
   // ── Hour / half-hour labels ───────────────────────────────────────────────
   const hourLabels = [];
