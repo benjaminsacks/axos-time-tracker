@@ -54,6 +54,15 @@ const DEFAULT_CATEGORIES = [
 const GRID_START  = 7 * 60;   // 7 AM in minutes
 const GRID_HEIGHT = 780;       // 7AM–8PM = 13h = 780 min = 780px
 
+// ─── DRAG CONSTANTS ──────────────────────────────────────────────────────────
+const GRID_START_MINS = 7 * 60;
+const GRID_END_MINS   = 20 * 60;
+const SNAP = 15;
+
+function snapMinutes(mins) {
+  return Math.round(mins / SNAP) * SNAP;
+}
+
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
 function getMondayOfWeek(date) {
   const d = new Date(date);
@@ -501,7 +510,11 @@ export default function App() {
   const [modal,            setModal]            = useState(null);
   const [catModal,         setCatModal]         = useState(false);
   const [now,              setNow]              = useState(new Date());
-  const gridRef = useRef(null);
+  const [dragState,        setDragState]        = useState(null);
+
+  const gridRef     = useRef(null);
+  const colRefs     = useRef([null, null, null, null, null]);
+  const mouseDownRef = useRef({});
 
   // ── Persistence with localStorage ───────────────────────────────────────
   useEffect(() => {
@@ -578,31 +591,130 @@ export default function App() {
   };
   const handleDeleteEvent = (id) => { setEvents(es => es.filter(e => e.id !== id)); setModal(null); };
 
-  const openCreateModal = (colDate, e) => {
-    const rect      = e.currentTarget.getBoundingClientRect();
-    const scrollTop = gridRef.current?.scrollTop || 0;
-    const y         = e.clientY - rect.top + scrollTop;
-    const rawMins   = GRID_START + Math.max(0, Math.min(GRID_HEIGHT, y));
-    const snapped   = Math.round(rawMins / 15) * 15;
-    const endSnap   = Math.min(snapped + 60, 20 * 60);
-    setModal({
-      mode: "create",
-      draft: {
-        id: generateId(), title: "", description: "",
-        category: categories[0]?.id || "other",
-        date: colDate, startTime: formatTime(snapped), endTime: formatTime(endSnap),
-        durationMinutes: endSnap - snapped,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      },
-    });
-  };
+  // ── Coordinate helpers ───────────────────────────────────────────────────
+  function getMinutesFromMouseY(clientY) {
+    if (!gridRef.current) return GRID_START_MINS;
+    const rect = gridRef.current.getBoundingClientRect();
+    const scrollTop = gridRef.current.scrollTop;
+    const y = clientY - rect.top + scrollTop;
+    const raw = GRID_START_MINS + Math.max(0, Math.min(GRID_END_MINS - GRID_START_MINS, y));
+    return snapMinutes(raw);
+  }
 
-  const openEditModal = (event) => setModal({ mode: "edit", draft: { ...event } });
+  function getColIndexFromMouseX(clientX) {
+    for (let i = 0; i < colRefs.current.length; i++) {
+      const el = colRefs.current[i];
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (clientX >= rect.left && clientX <= rect.right) return i;
+    }
+    return -1;
+  }
+
+  // ── Document-level drag handlers ─────────────────────────────────────────
+  useEffect(() => {
+    if (!dragState) return;
+
+    const onMouseMove = (e) => {
+      const mins   = getMinutesFromMouseY(e.clientY);
+      const colIdx = getColIndexFromMouseX(e.clientX);
+
+      setDragState(prev => {
+        if (!prev) return null;
+        if (prev.type === 'create') {
+          return { ...prev, currentMinutes: mins };
+        }
+        if (prev.type === 'move') {
+          const newStart     = snapMinutes(mins - prev.offsetMinutes);
+          const clampedStart = Math.max(GRID_START_MINS, Math.min(GRID_END_MINS - prev.originalEvent.durationMinutes, newStart));
+          const date         = colIdx >= 0 ? weekDates[colIdx] : prev.targetDate;
+          const ci           = colIdx >= 0 ? colIdx : prev.targetColIndex;
+          return { ...prev, targetDate: date, targetColIndex: ci, targetStartMinutes: clampedStart };
+        }
+        if (prev.type === 'resize-top') {
+          const maxStart = prev.originalEndMinutes - SNAP;
+          return { ...prev, targetStartMinutes: Math.min(maxStart, Math.max(GRID_START_MINS, mins)) };
+        }
+        if (prev.type === 'resize-bottom') {
+          const minEnd = prev.originalStartMinutes + SNAP;
+          return { ...prev, targetEndMinutes: Math.max(minEnd, Math.min(GRID_END_MINS, mins)) };
+        }
+        return prev;
+      });
+    };
+
+    const onMouseUp = () => {
+      if (!dragState) return;
+
+      if (dragState.type === 'create') {
+        const start = Math.min(dragState.anchorMinutes, dragState.currentMinutes);
+        const end   = Math.max(dragState.anchorMinutes, dragState.currentMinutes);
+        if (end - start >= SNAP) {
+          setModal({
+            mode: 'create',
+            draft: {
+              id: generateId(),
+              title: '',
+              description: '',
+              category: categories[0]?.id || 'other',
+              date: dragState.date,
+              startTime: formatTime(start),
+              endTime: formatTime(end),
+              durationMinutes: end - start,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+          });
+        }
+      }
+
+      if (dragState.type === 'move') {
+        const duration = dragState.originalEvent.durationMinutes;
+        const newStart = dragState.targetStartMinutes;
+        setEvents(prev => prev.map(ev => ev.id === dragState.eventId ? {
+          ...ev,
+          date: dragState.targetDate,
+          startTime: formatTime(newStart),
+          endTime: formatTime(newStart + duration),
+          updatedAt: new Date().toISOString(),
+        } : ev));
+      }
+
+      if (dragState.type === 'resize-top') {
+        const newStart = dragState.targetStartMinutes;
+        setEvents(prev => prev.map(ev => ev.id === dragState.eventId ? {
+          ...ev,
+          startTime: formatTime(newStart),
+          durationMinutes: parseTime(ev.endTime) - newStart,
+          updatedAt: new Date().toISOString(),
+        } : ev));
+      }
+
+      if (dragState.type === 'resize-bottom') {
+        const newEnd = dragState.targetEndMinutes;
+        setEvents(prev => prev.map(ev => ev.id === dragState.eventId ? {
+          ...ev,
+          endTime: formatTime(newEnd),
+          durationMinutes: newEnd - parseTime(ev.startTime),
+          updatedAt: new Date().toISOString(),
+        } : ev));
+      }
+
+      setDragState(null);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [dragState, weekDates, categories]);
 
   // ── Current time position ────────────────────────────────────────────────
-  const currentMins     = now.getHours() * 60 + now.getMinutes();
+  const currentMins      = now.getHours() * 60 + now.getMinutes();
   const timeIndicatorTop = currentMins - GRID_START;
-  const showIndicator   = timeIndicatorTop >= 0 && timeIndicatorTop <= GRID_HEIGHT;
+  const showIndicator    = timeIndicatorTop >= 0 && timeIndicatorTop <= GRID_HEIGHT;
 
   // ── Hour / half-hour labels ───────────────────────────────────────────────
   const hourLabels = [];
@@ -630,7 +742,13 @@ export default function App() {
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: "flex", height: "100vh", fontFamily: "Roboto, Arial, sans-serif", overflow: "hidden" }}>
+    <div style={{
+      display: "flex", height: "100vh",
+      fontFamily: "Roboto, Arial, sans-serif",
+      overflow: "hidden",
+      userSelect: dragState ? 'none' : 'auto',
+      cursor: dragState?.type === 'move' ? 'grabbing' : 'default',
+    }}>
 
       {/* ── LEFT SIDEBAR ─────────────────────────────────────────────────── */}
       <div style={{ width: 280, flexShrink: 0, height: "100vh", overflowY: "auto", background: B.white, borderRight: `1px solid ${B.lightGrey}`, display: "flex", flexDirection: "column" }}>
@@ -741,8 +859,14 @@ export default function App() {
               return (
                 <div
                   key={ds}
+                  ref={el => colRefs.current[colIndex] = el}
                   style={{ flex: 1, position: "relative", background: isToday ? "#F8FAFF" : "transparent", borderLeft: `1px solid ${B.lightGrey}`, minWidth: 0 }}
-                  onClick={(e) => { if (e.target === e.currentTarget) openCreateModal(ds, e); }}
+                  onMouseDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    e.preventDefault();
+                    const mins = getMinutesFromMouseY(e.clientY);
+                    setDragState({ type: 'create', date: ds, colIndex, anchorMinutes: mins, currentMinutes: mins });
+                  }}
                 >
                   {/* Hour gridlines */}
                   {hourLabels.map(({ top, label }) => (
@@ -761,43 +885,148 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Drag-to-create ghost */}
+                  {dragState?.type === 'create' && dragState.date === ds && (() => {
+                    const start      = Math.min(dragState.anchorMinutes, dragState.currentMinutes);
+                    const end        = Math.max(dragState.anchorMinutes, dragState.currentMinutes);
+                    const ghostTop   = (start - GRID_START_MINS) + 'px';
+                    const ghostHeight = Math.max(SNAP, end - start) + 'px';
+                    return (
+                      <div style={{
+                        position: 'absolute', top: ghostTop, height: ghostHeight,
+                        left: '3px', right: '3px',
+                        background: 'rgba(30,56,96,0.18)',
+                        border: '2px dashed #1E3860',
+                        borderRadius: 4,
+                        pointerEvents: 'none',
+                        zIndex: 3,
+                      }}>
+                        <div style={{ fontSize: 11, padding: '2px 5px', color: '#1E3860', fontWeight: 500 }}>
+                          {formatTimeDisplay(formatTime(start))} – {formatTimeDisplay(formatTime(Math.max(end, start + SNAP)))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Move ghost */}
+                  {dragState?.type === 'move' && dragState.targetDate === ds && (() => {
+                    const ghost    = dragState.originalEvent;
+                    const ghostCat = categories.find(c => c.id === ghost.category);
+                    const ghostTop = (dragState.targetStartMinutes - GRID_START_MINS) + 'px';
+                    const ghostHeight = ghost.durationMinutes + 'px';
+                    return (
+                      <div style={{
+                        position: 'absolute', top: ghostTop, height: ghostHeight,
+                        left: '3px', right: '3px',
+                        backgroundColor: ghostCat?.color || '#87B9D7',
+                        opacity: 0.75, borderRadius: 4,
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                        pointerEvents: 'none',
+                        border: `2px solid ${ghostCat?.color || '#87B9D7'}`,
+                        color: getTextColor(ghostCat?.color || '#87B9D7'),
+                        fontSize: 12, fontWeight: 500, padding: '3px 6px',
+                        zIndex: 3,
+                      }}>
+                        {ghost.title}
+                      </div>
+                    );
+                  })()}
+
                   {/* Events */}
                   {colEvents.map(ev => {
-                    const cat     = categories.find(c => c.id === ev.category) || { color: B.lightGrey };
-                    const top     = parseTime(ev.startTime) - GRID_START;
-                    const height  = Math.max(ev.durationMinutes, 15);
-                    const textCol = getTextColor(cat.color);
-                    if (top < 0 || top > GRID_HEIGHT) return null;
+                    const cat = categories.find(c => c.id === ev.category) || { color: B.lightGrey };
+
+                    const displayStart = (dragState?.type === 'resize-top' && dragState.eventId === ev.id)
+                      ? dragState.targetStartMinutes
+                      : parseTime(ev.startTime);
+                    const displayEnd = (dragState?.type === 'resize-bottom' && dragState.eventId === ev.id)
+                      ? dragState.targetEndMinutes
+                      : parseTime(ev.endTime);
+
+                    const topPx     = displayStart - GRID_START_MINS;
+                    const heightNum = Math.max(SNAP, displayEnd - displayStart);
+                    const textCol   = getTextColor(cat.color);
+                    const isMoving  = dragState?.type === 'move' && dragState.eventId === ev.id;
+
+                    if (topPx < 0 || topPx > GRID_HEIGHT) return null;
+
                     return (
                       <div
                         key={ev.id}
                         className="event-block"
-                        onClick={(e) => { e.stopPropagation(); openEditModal(ev); }}
+                        data-event-id={ev.id}
                         style={{
                           position: "absolute",
-                          top, height,
+                          top: topPx,
+                          height: heightNum,
                           left: 3, right: 3,
                           backgroundColor: cat.color,
                           borderRadius: 4,
-                          padding: "3px 6px",
                           overflow: "hidden",
-                          cursor: "pointer",
                           boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
-                          border: "1px solid rgba(0,0,0,0.12)",
-                          color: textCol,
-                          fontSize: 12,
-                          fontWeight: 500,
+                          border: "1px solid rgba(0,0,0,0.1)",
+                          opacity: isMoving ? 0.4 : 1,
+                          cursor: isMoving ? 'grabbing' : 'default',
                           zIndex: 2,
                         }}
                       >
-                        {height >= 30 ? (
-                          <>
-                            <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ev.title}</div>
-                            <div style={{ fontSize: 11, opacity: 0.85 }}>{formatTimeDisplay(ev.startTime)} – {formatTimeDisplay(ev.endTime)}</div>
-                          </>
-                        ) : (
-                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ev.title}</div>
-                        )}
+                        {/* Top resize handle */}
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation(); e.preventDefault();
+                            setDragState({ type: 'resize-top', eventId: ev.id, originalEndMinutes: parseTime(ev.endTime), targetStartMinutes: parseTime(ev.startTime) });
+                          }}
+                          style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 8, cursor: 'n-resize', zIndex: 2 }}
+                        />
+
+                        {/* Body — drag to move, click to edit */}
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation(); e.preventDefault();
+                            const clickMins  = getMinutesFromMouseY(e.clientY);
+                            const offsetMins = Math.max(0, snapMinutes(clickMins - parseTime(ev.startTime)));
+                            mouseDownRef.current[ev.id] = { x: e.clientX, y: e.clientY };
+                            setDragState({
+                              type: 'move',
+                              eventId: ev.id,
+                              originalEvent: ev,
+                              offsetMinutes: offsetMins,
+                              targetDate: ev.date,
+                              targetColIndex: weekDates.indexOf(ev.date),
+                              targetStartMinutes: parseTime(ev.startTime),
+                            });
+                          }}
+                          onClick={(e) => {
+                            const orig = mouseDownRef.current[ev.id];
+                            if (orig && Math.abs(e.clientX - orig.x) < 5 && Math.abs(e.clientY - orig.y) < 5) {
+                              setModal({ mode: 'edit', draft: { ...ev } });
+                            }
+                          }}
+                          style={{
+                            position: 'absolute', top: 8, bottom: 8, left: 0, right: 0,
+                            cursor: 'grab', zIndex: 1,
+                            padding: '0 6px',
+                            color: textCol,
+                          }}
+                        >
+                          {heightNum >= 30 ? (
+                            <>
+                              <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: 12, fontWeight: 500 }}>{ev.title}</div>
+                              <div style={{ fontSize: 11, opacity: 0.85 }}>{formatTimeDisplay(formatTime(displayStart))} – {formatTimeDisplay(formatTime(displayEnd))}</div>
+                            </>
+                          ) : (
+                            <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: 12, fontWeight: 500 }}>{ev.title}</div>
+                          )}
+                        </div>
+
+                        {/* Bottom resize handle */}
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation(); e.preventDefault();
+                            setDragState({ type: 'resize-bottom', eventId: ev.id, originalStartMinutes: parseTime(ev.startTime), targetEndMinutes: parseTime(ev.endTime) });
+                          }}
+                          style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 8, cursor: 's-resize', zIndex: 2 }}
+                        />
                       </div>
                     );
                   })}
