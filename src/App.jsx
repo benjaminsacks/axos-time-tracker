@@ -51,12 +51,12 @@ const DEFAULT_CATEGORIES = [
   { id: "other",       name: "Other",       color: "#D9D8D6" },
 ];
 
-const GRID_START  = 7 * 60;   // 7 AM in minutes
-const GRID_HEIGHT = 780;       // 7AM–8PM = 13h = 780 min = 780px
+const GRID_START  = 8 * 60;   // 8 AM in minutes
+const GRID_HEIGHT = 840;       // 8AM–10PM = 14h = 840 min = 840px
 
 // ─── DRAG CONSTANTS ──────────────────────────────────────────────────────────
-const GRID_START_MINS = 7 * 60;
-const GRID_END_MINS   = 20 * 60;
+const GRID_START_MINS = 8 * 60;
+const GRID_END_MINS   = 22 * 60;
 const SNAP = 15;
 
 function snapMinutes(mins) {
@@ -64,15 +64,21 @@ function snapMinutes(mins) {
 }
 
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
+const LA_TZ = 'America/Los_Angeles';
+const LA_DATE_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: LA_TZ });
+const LA_TIME_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: LA_TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+
 function getMondayOfWeek(date) {
-  const d = new Date(date);
+  // Normalise to LA date so getDay() reflects the correct weekday in Pacific time
+  const laStr = LA_DATE_FMT.format(date);
+  const d = new Date(laStr + 'T00:00:00');
   const day = d.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
   return d;
 }
-function formatDate(date) { return date.toISOString().split("T")[0]; }
+function formatDate(date) { return LA_DATE_FMT.format(date); }
 function parseTime(str) { const [h, m] = str.split(":").map(Number); return h * 60 + m; }
 function formatTime(minutes) {
   const h = Math.floor(minutes / 60);
@@ -416,6 +422,20 @@ function CatModal({ categories, setCategories, events, onClose }) {
     setEditingId(null);
   };
   const deleteCAT = (id) => { setCategories(cs => cs.filter(c => c.id !== id)); };
+  const moveUp    = (id) => setCategories(cs => {
+    const i = cs.findIndex(c => c.id === id);
+    if (i <= 0) return cs;
+    const next = [...cs];
+    [next[i - 1], next[i]] = [next[i], next[i - 1]];
+    return next;
+  });
+  const moveDown  = (id) => setCategories(cs => {
+    const i = cs.findIndex(c => c.id === id);
+    if (i < 0 || i >= cs.length - 1) return cs;
+    const next = [...cs];
+    [next[i], next[i + 1]] = [next[i + 1], next[i]];
+    return next;
+  });
   const addCat    = () => {
     if (!newName.trim()) return;
     setCategories(cs => [...cs, { id: generateId(), name: newName.trim(), color: newColor }]);
@@ -433,7 +453,7 @@ function CatModal({ categories, setCategories, events, onClose }) {
           <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#999", lineHeight: 1 }}>×</button>
         </div>
 
-        {categories.map(cat => (
+        {categories.map((cat, catIdx) => (
           <div key={cat.id} className="cat-row" style={{ padding: "8px 4px", borderRadius: 4, marginBottom: 4 }}>
             {editingId === cat.id ? (
               <div>
@@ -451,7 +471,22 @@ function CatModal({ categories, setCategories, events, onClose }) {
                 </div>
               </div>
             ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {/* Reorder arrows */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <button
+                    onClick={() => moveUp(cat.id)}
+                    disabled={catIdx === 0}
+                    style={{ background: "none", border: "none", cursor: catIdx === 0 ? "default" : "pointer", fontSize: 10, color: catIdx === 0 ? "#ccc" : B.navy, padding: "0 2px", lineHeight: 1 }}
+                    title="Move up"
+                  >▲</button>
+                  <button
+                    onClick={() => moveDown(cat.id)}
+                    disabled={catIdx === categories.length - 1}
+                    style={{ background: "none", border: "none", cursor: catIdx === categories.length - 1 ? "default" : "pointer", fontSize: 10, color: catIdx === categories.length - 1 ? "#ccc" : B.navy, padding: "0 2px", lineHeight: 1 }}
+                    title="Move down"
+                  >▼</button>
+                </div>
                 <div style={{ width: 14, height: 14, borderRadius: "50%", background: cat.color, flexShrink: 0 }} />
                 <span style={{ flex: 1, fontSize: 14, color: B.slate }}>{cat.name}</span>
                 <button onClick={() => startEdit(cat)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: B.navy, padding: "2px 4px" }} title="Edit">✏</button>
@@ -506,7 +541,7 @@ export default function App() {
   const [categories,       setCategories]       = useState(DEFAULT_CATEGORIES);
   const [loaded,           setLoaded]           = useState(false);
   const [currentWeekStart, setCurrentWeekStart] = useState(() => getMondayOfWeek(new Date()));
-  const [miniMonth,        setMiniMonth]        = useState(new Date());
+  const [miniMonth,        setMiniMonth]        = useState(() => new Date(formatDate(new Date()) + 'T00:00:00'));
   const [modal,            setModal]            = useState(null);
   const [catModal,         setCatModal]         = useState(false);
   const [now,              setNow]              = useState(new Date());
@@ -562,7 +597,11 @@ export default function App() {
 
   const prevWeek  = () => setCurrentWeekStart(d => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; });
   const nextWeek  = () => setCurrentWeekStart(d => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; });
-  const goToToday = () => { setCurrentWeekStart(getMondayOfWeek(new Date())); setMiniMonth(new Date()); };
+  const goToToday = () => {
+    const todayDate = new Date(formatDate(new Date()) + 'T00:00:00');
+    setCurrentWeekStart(getMondayOfWeek(todayDate));
+    setMiniMonth(todayDate);
+  };
 
   const rangeLabel = (() => {
     const start = new Date(currentWeekStart);
@@ -711,16 +750,19 @@ export default function App() {
     };
   }, [dragState, weekDates, categories]);
 
-  // ── Current time position ────────────────────────────────────────────────
-  const currentMins      = now.getHours() * 60 + now.getMinutes();
+  // ── Current time position (Pacific time) ────────────────────────────────
+  const currentMins = (() => {
+    const [h, m] = LA_TIME_FMT.format(now).split(':').map(Number);
+    return h * 60 + m;
+  })();
   const timeIndicatorTop = currentMins - GRID_START;
   const showIndicator    = timeIndicatorTop >= 0 && timeIndicatorTop <= GRID_HEIGHT;
 
   // ── Hour / half-hour labels ───────────────────────────────────────────────
   const hourLabels = [];
-  for (let h = 7; h <= 20; h++) {
+  for (let h = 8; h <= 22; h++) {
     const label = h === 12 ? "12 PM" : h > 12 ? `${h - 12} PM` : `${h} AM`;
-    hourLabels.push({ top: (h - 7) * 60, label });
+    hourLabels.push({ top: (h - 8) * 60, label });
   }
 
   // ── Pie data ─────────────────────────────────────────────────────────────
